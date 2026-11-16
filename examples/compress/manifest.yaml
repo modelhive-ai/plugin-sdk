@@ -1,0 +1,56 @@
+apiVersion: integrations.sundelion.io/v1alpha1
+kind: Plugin
+metadata:
+  id: io.example.compress
+  name: Compress plugin
+  version: 0.1.0
+  publisher: Sundelion
+  description: Shrinks tool output with RedactSpans, deterministically and without state.
+  license: Apache-2.0
+spec:
+  compatibility:
+    sundelion: ">=0.1.0"
+  capabilities:
+    - request-transform
+    - compression
+  permissions:
+    secrets: [hmac_secret]
+    sandbox: false
+  connector:
+    runtime: builtin
+    ref: compress
+  health:
+    operation: none
+  runtime:
+    command: bin/plugin-compress
+  pipeline:
+    phase: transform
+    engine: http
+    failOpen: true
+    timeout: 200ms
+    priority: 200
+  config:
+    secrets:
+      - name: hmac_secret
+        generate:
+          bytes: 32
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        min_repeat:
+          type: integer
+          minimum: 2
+          default: 3
+        max_tool_bytes:
+          type: integer
+          minimum: 1
+          default: 16384
+        head_bytes:
+          type: integer
+          minimum: 1
+          default: 4096
+        tail_bytes:
+          type: integer
+          minimum: 1
+          default: 2048

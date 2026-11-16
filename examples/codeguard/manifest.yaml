@@ -1,0 +1,86 @@
+apiVersion: integrations.sundelion.io/v1alpha1
+kind: Plugin
+metadata:
+  id: com.example.codeguard
+  name: Customer code guard
+  version: 0.1.0
+  publisher: Example
+  description: Masks or blocks customer codes and loyalty card numbers in prompts before they reach the model.
+  license: LicenseRef-Proprietary
+spec:
+  compatibility:
+    sundelion: ">=0.1.0"
+  capabilities: [guardrail]
+  permissions:
+    sundelion: []
+    network: []
+    secrets: [hmac_secret]
+    sandbox: false
+  config:
+    secrets:
+      - name: hmac_secret
+        generate:
+          bytes: 32
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          title: Action
+          enum: [mask, block]
+          enumNames: [Mask the code, Block the request]
+          default: mask
+          x-sundelion-widget: radio
+          x-sundelion-scope: group
+          x-sundelion-merge: strictest
+          x-sundelion-order: [mask, block]
+        patterns:
+          type: array
+          title: Codes to look for
+          x-sundelion-widget: table
+          minItems: 1
+          maxItems: 20
+          default:
+            - {name: carta_fedelta, regex: '\bFID-?[0-9]{10}\b'}
+            - {name: codice_cliente, regex: '\bCLI[0-9]{8}\b'}
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, regex]
+            properties:
+              name:
+                type: string
+                title: Name
+                minLength: 1
+                maxLength: 32
+                pattern: "^[A-Za-z0-9_-]+$"
+              regex:
+                type: string
+                title: Regular expression
+                minLength: 1
+                maxLength: 512
+        include_tool_output:
+          type: boolean
+          title: Also check tool output
+          default: true
+          x-sundelion-widget: switch
+    uiSchema:
+      ui:order: [mode, patterns, include_tool_output]
+      mode:
+        help: "Mask replaces each code with [name]. Block refuses the request. An access group may only tighten it, from mask to block."
+      patterns:
+        help: "RE2 syntax. A code is masked as [name], so keep names short and without spaces."
+  connector:
+    runtime: builtin
+    ref: codeguard
+  health:
+    operation: none
+  runtime:
+    command: bin/plugin-codeguard
+  pipeline:
+    phase: guard
+    engine: http
+    timeout: 500ms
+    failOpen: false
+    priority: 50

@@ -1,0 +1,1139 @@
+openapi: 3.1.0
+info:
+  title: Sundelion Plugin HTTP Protocol
+  version: 1.0.0
+  description: |
+    Wire contract shared by out-of-process pipeline plugins and their
+    plugin-to-gateway resource callbacks.
+
+    Plugin runtime calls may use `unix:///absolute/plugin.sock` or HTTPS. Unix
+    sockets carry HTTP/1.1 over the socket; HTTPS may additionally require a
+    client certificate. Every runtime POST is signed with the instance HMAC
+    secret. `X-Sundelion-Timestamp` is Unix seconds and must be within five
+    minutes of the receiver. `X-Sundelion-Signature` is
+    `sha256=<hex(HMAC-SHA256(secret, timestamp + "\n" + method + "\n" +
+    escaped_path + "\n" + exact_body))>`.
+
+    Plugin admin API requests use `/v1/plugin/api/{path}` and may use GET,
+    POST, PUT, PATCH, or DELETE. They carry exactly one base64url JSON
+    identity generated only by the gateway: `X-Sundelion-Plugin-Admin` (a
+    console user, `Admin`) on console routes, `X-Sundelion-Plugin-Token` (the
+    request's bearer token, `APIToken`) on routes declared with `auth: token`,
+    which the gateway does not authenticate. Their
+    signature binds both header values (the absent one is empty) and the exact
+    query string: `sha256=<hex(HMAC-SHA256(secret, timestamp + "\n" + method +
+    "\n" + escaped_path_and_query + "\n" + admin_header_value + "\n" +
+    token_header_value + "\n" + exact_body))>`. The plugin must reject a
+    request with neither or both identities, or a malformed, unsigned, or
+    tampered one. Process, output-check, and observe signatures keep
+    the original canonical form above.
+
+    Limits of the signature: there is no nonce, so a captured request can be
+    replayed within the five-minute window. `escaped_path` is the full request
+    path, including any base path of the plugin endpoint, so a reverse proxy
+    that rewrites or strips that prefix breaks verification: keep the path
+    identical end to end.
+
+    Resource callback calls use the instance bearer token. The gateway also
+    checks the installed manifest permission and resource ownership before
+    exposing a permission-scoped `Resources` facade.
+
+    Callback token. The token is derived, never delivered separately:
+    `hex(HMAC-SHA256(hmac_secret, "sundelion/plugin-resources/v1"))`, i.e.
+    `plugin.ResourceToken(hmac_secret)` in the Go SDK. Gateway and plugin both
+    hold the instance `hmac_secret`, so rotating it revokes the old token, and
+    disabling or deleting the instance removes its grant. The token does not
+    reveal the secret or allow signing runtime calls. The callback endpoint is
+    mounted at `/api/v1/plugin-resources/` without API-key authentication; it
+    only accepts this bearer token. A call is refused with 401 for an unknown
+    or revoked token and with 403 for an operation outside the manifest's
+    `permissions.sundelion` (plus `workload` when `spec.workload` is set) or,
+    for `secrets/store`, a secret not listed in `permissions.secrets`.
+
+    Go plugins started by `plugin.Serve` get a ready client in
+    `Instance.Resources` when these environment variables are set:
+    `SUNDELION_PLUGIN_GATEWAY_URL` (gateway base URL, http or https) and
+    optionally `SUNDELION_PLUGIN_GATEWAY_CA_FILE` (extra CA to trust). The
+    token is derived from `SUNDELION_PLUGIN_HMAC_SECRET`. Plugins in other
+    languages call the paths below directly with `Authorization: Bearer
+    <token>`.
+servers:
+  - url: https://plugin.example
+    description: Out-of-process plugin runtime
+  - url: https://gateway.example
+    description: Sundelion gateway resource callback API
+tags:
+  - name: Plugin runtime
+  - name: Resource callbacks
+
+paths:
+  /health:
+    get:
+      tags: [Plugin runtime]
+      operationId: pluginHealth
+      summary: Plugin process health
+      security: []
+      responses:
+        "200":
+          description: Plugin process is ready to accept runtime calls.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /v1/plugin/process:
+    post:
+      tags: [Plugin runtime]
+      operationId: processPluginRequest
+      summary: Run a request through one configured plugin instance
+      security:
+        - PluginSignature: []
+          PluginTimestamp: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Request"
+      responses:
+        "200":
+          description: Operations for the gateway to apply.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ops"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/BadSignature"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "502":
+          $ref: "#/components/responses/PluginFailure"
+
+  /v1/plugin/output/check:
+    post:
+      tags: [Plugin runtime]
+      operationId: checkPluginOutput
+      summary: Check one window of a streaming model response
+      description: |
+        Called once per sentence or configured token window. `session_id` is
+        required and remains identical for every window of one generated
+        response. `seq` starts at zero and increases monotonically; `final`
+        marks the last window.
+      security:
+        - PluginSignature: []
+          PluginTimestamp: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutputWindow"
+      responses:
+        "200":
+          description: Verdict for this output window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutputVerdict"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/BadSignature"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "502":
+          $ref: "#/components/responses/PluginFailure"
+
+  /v1/plugin/observe:
+    post:
+      tags: [Plugin runtime]
+      operationId: observePluginExchange
+      summary: Observe a completed model exchange
+      description: Called asynchronously after the client response completes.
+      security:
+        - PluginSignature: []
+          PluginTimestamp: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Exchange"
+      responses:
+        "204":
+          description: Exchange accepted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/BadSignature"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "502":
+          $ref: "#/components/responses/PluginFailure"
+
+  /v1/plugin/api/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Plugin runtime]
+      operationId: pluginAdminAPIGet
+      summary: Gateway-forwarded plugin admin API request
+      security:
+        - PluginSignature: []
+          PluginTimestamp: []
+          PluginAdmin: []
+        - PluginSignature: []
+          PluginTimestamp: []
+          PluginToken: []
+      responses:
+        "200": {description: Plugin-defined response.}
+        "401": {$ref: "#/components/responses/BadSignature"}
+    post:
+      tags: [Plugin runtime]
+      operationId: pluginAdminAPIPost
+      summary: Gateway-forwarded plugin admin API request
+      security:
+        - PluginSignature: []
+          PluginTimestamp: []
+          PluginAdmin: []
+        - PluginSignature: []
+          PluginTimestamp: []
+          PluginToken: []
+      responses:
+        "200": {description: Plugin-defined response.}
+        "401": {$ref: "#/components/responses/BadSignature"}
+
+  /api/v1/plugin-resources/oidc-clients:
+    post:
+      tags: [Resource callbacks]
+      operationId: createPluginOIDCClient
+      summary: Create an OIDC client owned by this instance
+      x-sundelion-permission: apps:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        $ref: "#/components/requestBodies/OIDCClientSpecBody"
+      responses:
+        "200":
+          description: Created ID and one-time secret.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedOIDCClient"
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/oidc-clients/owned:
+    post:
+      tags: [Resource callbacks]
+      operationId: getOwnedPluginOIDCClient
+      summary: Get the OIDC client owned by this instance
+      x-sundelion-permission: apps:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        $ref: "#/components/requestBodies/EmptyBody"
+      responses:
+        "200":
+          description: Owned client, or null when none exists.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [client]
+                properties:
+                  client:
+                    oneOf:
+                      - $ref: "#/components/schemas/OIDCClientInfo"
+                      - type: "null"
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/oidc-clients/{id}/update:
+    post:
+      tags: [Resource callbacks]
+      operationId: updatePluginOIDCClient
+      summary: Update an OIDC client owned by this instance
+      x-sundelion-permission: apps:write
+      security:
+        - InstanceToken: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        $ref: "#/components/requestBodies/OIDCClientSpecBody"
+      responses:
+        "204":
+          description: Client updated.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/oidc-clients/{id}/rotate-secret:
+    post:
+      tags: [Resource callbacks]
+      operationId: rotatePluginOIDCClientSecret
+      summary: Rotate an owned OIDC client secret
+      x-sundelion-permission: apps:write
+      security:
+        - InstanceToken: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        $ref: "#/components/requestBodies/EmptyBody"
+      responses:
+        "200":
+          description: New one-time secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret]
+                properties:
+                  secret:
+                    type: string
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/oidc-clients/{id}/delete:
+    post:
+      tags: [Resource callbacks]
+      operationId: deletePluginOIDCClient
+      summary: Delete an OIDC client owned by this instance
+      x-sundelion-permission: apps:write
+      security:
+        - InstanceToken: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        $ref: "#/components/requestBodies/EmptyBody"
+      responses:
+        "204":
+          description: Client deleted.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/service-keys:
+    post:
+      tags: [Resource callbacks]
+      operationId: createPluginServiceKey
+      summary: Create a service key owned by this instance
+      x-sundelion-permission: keys:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                spec:
+                  $ref: "#/components/schemas/ServiceKeySpec"
+      responses:
+        "200":
+          description: Created ID and one-time plaintext key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, key]
+                properties:
+                  id:
+                    type: string
+                  key:
+                    type: string
+                    writeOnly: true
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/service-keys/{id}/revoke:
+    post:
+      tags: [Resource callbacks]
+      operationId: revokePluginServiceKey
+      summary: Revoke a service key owned by this instance
+      x-sundelion-permission: keys:write
+      security:
+        - InstanceToken: []
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        $ref: "#/components/requestBodies/EmptyBody"
+      responses:
+        "204":
+          description: Service key revoked.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/access-groups/bind:
+    post:
+      tags: [Resource callbacks]
+      operationId: bindPluginAccessGroup
+      summary: Bind this instance to an existing access group
+      x-sundelion-permission: access:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_id]
+              properties:
+                group_id:
+                  type: string
+                  minLength: 1
+      responses:
+        "204":
+          description: Access group bound.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/secrets/store:
+    post:
+      tags: [Resource callbacks]
+      operationId: storePluginSecret
+      summary: Store one manifest-allowed instance secret
+      x-sundelion-permission: secrets:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                value:
+                  type: string
+                  writeOnly: true
+      responses:
+        "204":
+          description: Secret stored.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/stack/apply:
+    post:
+      tags: [Resource callbacks]
+      operationId: applyPluginStack
+      summary: Apply this instance's declared workload
+      x-sundelion-permission: workload:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StackInput"
+      responses:
+        "204":
+          description: Stack accepted by the runtime.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/stack/status:
+    post:
+      tags: [Resource callbacks]
+      operationId: getPluginStackStatus
+      summary: Read this instance's workload status
+      x-sundelion-permission: workload:read
+      security:
+        - InstanceToken: []
+      requestBody:
+        $ref: "#/components/requestBodies/EmptyBody"
+      responses:
+        "200":
+          description: Current stack status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StackStatus"
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/stack/remove:
+    post:
+      tags: [Resource callbacks]
+      operationId: removePluginStack
+      summary: Remove this instance's workload
+      x-sundelion-permission: workload:write
+      security:
+        - InstanceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [delete_volumes]
+              properties:
+                delete_volumes:
+                  type: boolean
+      responses:
+        "204":
+          description: Stack removed.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+  /api/v1/plugin-resources/host/:
+    get:
+      tags: [Resource callbacks]
+      operationId: discoverPluginHostServices
+      summary: Discover host services granted to this plugin instance
+      security:
+        - InstanceToken: []
+      responses:
+        "200":
+          description: A map whose true entries are the services available to the instance.
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+
+  /api/v1/plugin-resources/host/{service}/{op}:
+    post:
+      tags: [Resource callbacks]
+      operationId: callPluginHostService
+      summary: Call a granted plugin host service
+      description: |
+        Services are `storage`, `vault`, `models`, `pricing`, `guard`, `groups`, `sessions`, and
+        `plugins`. Operations match the Go `plugin.Host` interfaces: storage
+        (`get`, `put`, `delete`, `query`, `batch`), vault (`put`, `get`, `list`,
+        `delete`), models (`complete`, `list`, `info`, `classify`, `classifiers`), pricing (`model`), guard (`check`, `redact`),
+        groups (`list`), sessions (`get`), and plugins (`contributions`, `invoke`). The gateway
+        exposes only services requested by the installed manifest.
+
+        `models/classify` asks a SystemOne classifier one question about a text:
+        `{"model": "jev", "text": "...", "kind": "yes_no|choice|score", "question": "...",
+        "options": [...], "instructions": "..."}` (`options`: 2-20 for `choice`). It
+        returns `answer`, `probability` (yes_no), `choice`, `score` (0-1), `confidence`,
+        `model` and `cost_usd`; the gateway bills the call to the plugin. A model that is
+        not a SystemOne classifier is a 404. `models/classifiers` returns
+        `{"classifiers": ["jev", ...]}`, the names `classify` accepts.
+
+        `sessions` needs the `sessions:read` permission. `sessions/get` takes
+        `{"session_id": "...", "key_id": "..."}` (the request's `caller.key_id`) and returns
+        the aggregate of the session's earlier exchanges (counts, tokens, cost, tools,
+        files, finding kinds; never prompt text). A session of another key, an unknown
+        session and a gateway without traffic recording are all a 404.
+
+        `pricing` needs the `pricing:read` permission. `pricing/model` takes
+        `{"model": "<alias>"}` and returns the effective USD rates per token
+        (`input_cost_per_token`, `output_cost_per_token`,
+        `cache_read_input_token_cost`, `cache_creation_input_token_cost`; cache
+        rates fall back to the input rate); a model without a price is a 404.
+        It is read-only: `models/complete` returns the call's tokens (cache
+        included) and `cost_usd`, and the gateway bills the call itself.
+      security:
+        - InstanceToken: []
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema: {type: string}
+        - name: op
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: Operation result.}
+        "204": {description: Operation completed without a result.}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InstanceTokenRequired"
+        "403":
+          $ref: "#/components/responses/PermissionDenied"
+        "404": {description: Host resource or operation not found.}
+        "409": {description: Revision or uniqueness conflict.}
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "502":
+          $ref: "#/components/responses/ResourceFailure"
+
+components:
+  securitySchemes:
+    PluginSignature:
+      type: apiKey
+      in: header
+      name: X-Sundelion-Signature
+      description: HMAC-SHA256 signature formatted as `sha256=<lowercase hex>`.
+    PluginTimestamp:
+      type: apiKey
+      in: header
+      name: X-Sundelion-Timestamp
+      description: Unix timestamp in seconds; accepted clock skew is five minutes.
+    PluginAdmin:
+      type: apiKey
+      in: header
+      name: X-Sundelion-Plugin-Admin
+      description: Base64url JSON console user (`Admin`) signed by the API-specific request signature.
+    PluginToken:
+      type: apiKey
+      in: header
+      name: X-Sundelion-Plugin-Token
+      description: "Base64url JSON bearer token (`APIToken` with `bearer`, empty without one) on `auth: token` routes, signed by the API-specific request signature. The plugin checks the token itself."
+    InstanceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque instance token
+
+  parameters:
+    ResourceID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+
+  requestBodies:
+    EmptyBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            maxProperties: 0
+    OIDCClientSpecBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [spec]
+            properties:
+              spec:
+                $ref: "#/components/schemas/OIDCClientSpec"
+
+  responses:
+    BadRequest:
+      description: Invalid request body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadSignature:
+      description: Missing, invalid, or stale HMAC signature.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooLarge:
+      description: Request body exceeds 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: Content-Type is not application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotImplemented:
+      description: The configured plugin handler does not implement this hook.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PluginFailure:
+      description: The plugin hook returned an error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InstanceTokenRequired:
+      description: Missing instance bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PermissionDenied:
+      description: Token invalid, permission absent, target not allowed, or resource not owned.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ResourceFailure:
+      description: Authorized resource operation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Health:
+      type: object
+      required: [status, plugin]
+      properties:
+        status:
+          const: ok
+        plugin:
+          type: string
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+
+    Request:
+      type: object
+      required: [id, format, path, stream, messages, caller]
+      properties:
+        id:
+          type: string
+        format:
+          type: string
+          enum: [anthropic, openai, responses, gemini, kiro, raw]
+          description: >-
+            The wire API. `raw` marks a request the gateway cannot read (another
+            path, a body that does not parse): `messages` is empty, and only a
+            guard instance whose manifest lists `raw` in `spec.pipeline.formats`
+            receives it. Of the answer only `block`, `annotations` and
+            `findings` apply; instances with no `formats` never get `raw`.
+        path:
+          type: string
+        method:
+          type: string
+          description: HTTP method of the client's request.
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            The client's request headers, one value per name (comma joined).
+            Credentials (authorization, cookies, API keys, token and secret
+            headers) arrive as `[REDACTED]`.
+        remote_addr:
+          type: string
+          description: The client's address as the gateway saw it.
+        model:
+          type: string
+        stream:
+          type: boolean
+        system:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        caller:
+          $ref: "#/components/schemas/Caller"
+
+    Message:
+      type: object
+      required: [role, text]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, tool]
+        text:
+          type: string
+        tool_result:
+          type: boolean
+        tool_text:
+          type: string
+          readOnly: true
+
+    Caller:
+      type: object
+      properties:
+        key_id:
+          type: string
+        user_id:
+          type: string
+        team_id:
+          type: string
+        groups:
+          type: array
+          items:
+            type: string
+        agent:
+          type: string
+
+    Ops:
+      type: object
+      description: The empty object permits the request unchanged.
+      properties:
+        block:
+          $ref: "#/components/schemas/Block"
+        respond:
+          $ref: "#/components/schemas/Respond"
+        append_system:
+          type: array
+          items:
+            type: string
+        replace_text:
+          type: object
+          description: Map from decimal message index to replacement text.
+          additionalProperties:
+            type: string
+        redact_spans:
+          type: object
+          description: Literal message and tool-output substrings to replace. Applied only to user-visible conversation text, never system prompts, tool definitions, identifiers, or keys. At most 4096 entries; keys are 1..4096 bytes and replacements must not contain their key; otherwise the gateway refuses the request with 503.
+          maxProperties: 4096
+          additionalProperties:
+            type: string
+        model:
+          type: string
+        annotations:
+          $ref: "#/components/schemas/Annotations"
+        savings:
+          type: array
+          description: What the plugin removed from the request, shown in AI traffic.
+          items:
+            $ref: "#/components/schemas/Saving"
+        cost_usd:
+          type: number
+          minimum: 0
+          description: For a workflow node call, what the call spent on paid model or classifier calls (models/complete and models/classify included), added to the run's cost so the workflow shows it. The gateway bills nothing from it.
+
+    Saving:
+      type: object
+      required: [technique, tokens]
+      properties:
+        technique:
+          type: string
+        blocks:
+          type: integer
+        tokens:
+          type: integer
+          description: Estimated tokens removed, gross of the extraction cost; AI traffic reports it net.
+        extraction_tokens:
+          type: integer
+        extraction_cost_usd:
+          type: number
+        failures:
+          type: integer
+          description: Attempts that failed and left the request as it was, shown in the session's Compression panel.
+
+    Block:
+      type: object
+      required: [kind, message]
+      properties:
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: Omitted or zero defaults to 403.
+        kind:
+          type: string
+        message:
+          type: string
+
+    Respond:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+
+    OutputWindow:
+      type: object
+      required: [session_id, seq, text, final]
+      description: A slice of a model's answer text. Windows of one answer are sent in order and never concurrently.
+      properties:
+        session_id:
+          type: string
+          minLength: 1
+          description: Stable identifier shared by every window of one generated response.
+        request:
+          $ref: "#/components/schemas/Request"
+          description: The request as forwarded, edits applied. Sent only on the window with seq 0; keep what you need by session_id.
+        seq:
+          type: integer
+          minimum: 0
+        text:
+          type: string
+          description: Output since the previous window, as the plugins after this one in request order left it.
+        final:
+          type: boolean
+          description: Set on the last window, after the answer ended. Its text is often empty.
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    Usage:
+      type: object
+      description: The provider's token count for one answer.
+      required: [input_tokens, output_tokens]
+      properties:
+        input_tokens:
+          type: integer
+        cached_input_tokens:
+          type: integer
+          description: Part of input_tokens.
+        cache_creation_tokens:
+          type: integer
+          description: Part of input_tokens.
+        output_tokens:
+          type: integer
+        cost_usd:
+          type: number
+
+    OutputVerdict:
+      type: object
+      description: The empty object permits this output window unchanged.
+      properties:
+        block:
+          $ref: "#/components/schemas/Block"
+        replace:
+          type: string
+          description: Sent instead of the window's text; later plugins see the replacement. Ignored with block.
+        annotations:
+          $ref: "#/components/schemas/Annotations"
+        findings:
+          type: array
+          description: Detections, recorded in AI traffic with a response origin.
+          items:
+            type: object
+            required: [type]
+            properties:
+              kind:
+                type: string
+                enum: [safety, plugin]
+                description: Omitted means plugin.
+              type:
+                type: string
+
+    Exchange:
+      type: object
+      required: [request, status, duration_ns]
+      properties:
+        request:
+          oneOf:
+            - $ref: "#/components/schemas/Request"
+            - type: "null"
+        status:
+          type: integer
+        output:
+          type: string
+        provider:
+          type: string
+        input_tokens:
+          type: integer
+          minimum: 0
+        output_tokens:
+          type: integer
+          minimum: 0
+        cost_usd:
+          type: number
+        duration_ns:
+          type: integer
+          format: int64
+        annotations:
+          $ref: "#/components/schemas/Annotations"
+
+    Annotations:
+      type: object
+      additionalProperties:
+        type: string
+
+    OIDCClientSpec:
+      type: object
+      required: [name, redirect_uris]
+      properties:
+        name:
+          type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        post_logout_redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        no_pkce:
+          type: boolean
+        public:
+          type: boolean
+
+    OIDCClientInfo:
+      type: object
+      required:
+        - id
+        - name
+        - active
+        - public
+        - require_pkce
+        - redirect_uris
+        - post_logout_redirect_uris
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        active:
+          type: boolean
+        public:
+          type: boolean
+        require_pkce:
+          type: boolean
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        post_logout_redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    CreatedOIDCClient:
+      type: object
+      required: [id, secret]
+      properties:
+        id:
+          type: string
+        secret:
+          type: string
+          writeOnly: true
+
+    ServiceKeySpec:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        access_group_id:
+          type: string
+        access_group_name:
+          type: string
+      oneOf:
+        - required: [access_group_id]
+        - required: [access_group_name]
+
+    StackInput:
+      type: object
+      properties:
+        resources:
+          type: object
+          additionalProperties:
+            type: string
+        host_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        public_url:
+          type: string
+          format: uri
+
+    StackStatus:
+      type: object
+      required: [instance, phase, services]
+      properties:
+        instance:
+          type: string
+        phase:
+          type: string
+        error:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceStatus"
+
+    ServiceStatus:
+      type: object
+      required: [name, state]
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+        image:
+          type: string
+        exit_code:
+          type: integer
+        restart_count:
+          type: integer
+          minimum: 0
+        host_port:
+          type: integer
+          minimum: 0
+          maximum: 65535

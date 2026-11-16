@@ -1,0 +1,55 @@
+apiVersion: integrations.sundelion.io/v1alpha1
+kind: Plugin
+metadata:
+  id: com.example.codeguard-remote
+  name: Customer code guard (remote)
+  version: 0.1.0
+  publisher: Example
+  description: Masks customer codes and loyalty card numbers in prompts; HTTPS service run by the company.
+  license: LicenseRef-Proprietary
+spec:
+  compatibility:
+    sundelion: ">=0.1.0"
+  capabilities: [guardrail]
+  permissions:
+    sundelion: []
+    # The gateway calls only the host written in the endpoint field, on these ports.
+    network:
+      - host: "{{config.endpoint}}"
+        ports: [443, 8443]
+    secrets: [hmac_secret]
+    sandbox: false
+  config:
+    secrets:
+      - name: hmac_secret
+        description: Shared with the service (SUNDELION_PLUGIN_HMAC_SECRET); signs every call.
+        required: true
+    schema:
+      type: object
+      additionalProperties: false
+      required: [endpoint]
+      properties:
+        endpoint:
+          type: string
+          title: Service URL
+          description: "https://host:port of the plugin service"
+          format: uri
+          pattern: "^https://"
+        tls_ca_file:
+          type: string
+          title: CA certificate
+          description: File in the gateway's plugin-tls folder, when the service certificate comes from an internal CA.
+        tls_server_name:
+          type: string
+          title: TLS server name
+  connector:
+    runtime: builtin
+    ref: codeguard-remote
+  health:
+    operation: none
+  pipeline:
+    phase: guard
+    engine: http
+    timeout: 500ms
+    failOpen: false
+    priority: 50

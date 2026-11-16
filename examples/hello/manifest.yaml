@@ -1,0 +1,62 @@
+apiVersion: integrations.sundelion.io/v1alpha1
+kind: Plugin
+metadata:
+  id: io.example.hello
+  name: Managed hello plugin
+  version: 0.1.0
+  publisher: Sundelion example
+  description: Minimal managed local plugin served over a gateway-owned Unix socket.
+  license: Apache-2.0
+spec:
+  compatibility:
+    sundelion: ">=0.1.0"
+  capabilities: [request-transform]
+  permissions:
+    sundelion: []
+    network: []
+    secrets: [hmac_secret]
+    sandbox: false
+  config:
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          default: Hello from a managed plugin.
+    secrets:
+      - name: hmac_secret
+        generate:
+          bytes: 32
+  connector:
+    runtime: builtin
+    ref: hello
+  health:
+    operation: none
+  runtime:
+    command: bin/plugin-hello
+  pipeline:
+    phase: transform
+    engine: http
+    failOpen: true
+  api:
+    slug: hello
+    permissions:
+      - name: read
+        label: Read hello plugin
+        roles: [viewer, admin, owner]
+    routes:
+      - method: GET
+        path: /hello
+        permission: read
+  contributes:
+    - to: console.app
+      id: app
+      label: Hello app
+      entry: index.html
+    - to: console.menu
+      id: hello
+      label: Hello app
+      icon: sparkles
+      page: plugin/io.example.hello/app
+      permission: hello:read
